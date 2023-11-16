@@ -1,6 +1,6 @@
 
-openai
 discord.py
-python-dotenv==0.19.2
-aiohttp==3.8.1
-asyncio==3.4.3
+python-dotenv
+aiohttp
+asyncio
+openai

@@ -4,34 +4,31 @@ from discord.ext import commands
 from dotenv import load_dotenv, find_dotenv
 import json
 from datetime import datetime
-import openai
-from openai.error import ServiceUnavailableError
+from openai import OpenAI
 
-# Load environment variables
 load_dotenv(find_dotenv())
 
-# Read the log file path from the environment variables
 LOG_FILE_PATH = os.getenv("LOG_FILE_PATH")
-openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # Initializing OpenAI client
 INSTRUCTION = os.getenv("INSTRUCTION")
 
-# Create a bot instance with intents
+CONVERSATION_HISTORY_FILE = os.getenv("CONVERSATION_HISTORY_FILE", "conversation_history.json")
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+try:
+    with open(CONVERSATION_HISTORY_FILE, "r") as file:
+        conversation_history = json.load(file)
+except FileNotFoundError:
+    conversation_history = []
+
+previous_question = ""
+
 @bot.event
 async def on_ready():
     print(f"We have logged in as {bot.user}")
-
-@bot.event
-async def on_message(message):
-    if not message.author.bot:  # Ignore messages sent by bots
-        if 'bob' in message.content.lower() and not message.content.startswith('!bob'):
-            # await message.add_reaction('🤖')
-            await message.channel.send("sup")  # Send "sup" as a reply to the 'bob' keyword
-
-    await bot.process_commands(message)
 
 @bot.event
 async def on_reaction_add(reaction, user):
@@ -41,58 +38,78 @@ async def on_reaction_add(reaction, user):
     emoji = "🤖"
     if reaction.emoji == emoji:
         try:
-            # Delete the reacted message sent by the bot
             await reaction.message.delete()
         except discord.NotFound:
-            pass  # Message already deleted or not found
-
+            pass
 
 @bot.command()
 async def bob(ctx, *, question):
+    global conversation_history
+    global previous_question
+
     print(f"Received command: !bob {question}")
     system_message = f'{ctx.author.name} asks "{question}"'
 
-    # Include username, instruction, and question in the user message
+    last_two_messages = conversation_history[-2:]
+    user_messages = [{"role": "user", "content": msg.get("question", "")} for msg in last_two_messages]
+
+    user_messages.append({"role": "user", "content": f"{system_message}\n{question}"})
+
     messages = [
-        {
-            "role": "system",
-            "content": INSTRUCTION,
-        },
-        {
-            "role": "user",
-            "content": f"{system_message}\n{question}",
-        },
+        {"role": "system", "content": INSTRUCTION},
+        {"role": "user", "content": f"{system_message}\n{question}"}
     ]
 
-    try:
-        async with ctx.typing():
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=messages,
-                temperature=0.7,
-                max_tokens=150,
-            )
-    except ServiceUnavailableError:
-        await ctx.send("I apologize, but I'm currently experiencing high traffic and cannot respond at the moment. Please try again later.")
-        return
-    except Exception as e:
-        await ctx.send(f"An error occurred while processing your request: {e}")
-        return
+    for msg in last_two_messages:
+        messages.append({
+            "role": "user",
+            "content": msg.get("content", "")
+        })
 
-    if response and "choices" in response and len(response["choices"]) > 0:
-        response_content = response["choices"][0]["message"]["content"]
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=messages,
+            temperature=1.0,
+            max_tokens=250,
+        )
+
+        print("API Response Content:", response.choices[0].message.content)  # Add this line to print only the content
+
+        response_content = response.choices[0].message.content
         if response_content:
             command_message = await ctx.send(response_content)
-            await command_message.add_reaction("🤖")  # Add the 🤖 reaction to the response message
-            await ctx.message.add_reaction("🤖")  # Add the 🤖 reaction to the !bob command message
+            await command_message.add_reaction("🤖")
+            await ctx.message.add_reaction("🤖")
+
+            conversation_history.append({
+                "author": ctx.author.name,
+                "question": f"{system_message}\n{question}",
+                "response_content": response_content,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+
+            previous_question = question
+
+            with open(CONVERSATION_HISTORY_FILE, "w") as file:
+                json.dump(conversation_history[-2:], file)
 
             log_conversation(ctx.author.name, question, response_content)
         else:
             await ctx.send("I'm sorry, I couldn't generate a response at the moment.")
-    else:
-        print(f"Empty or invalid response from GPT-3.5-turbo model: {response}")
-        await ctx.send("I'm sorry, I couldn't generate a response at the moment.")
+    except Exception as e:
+        await ctx.send(f"An error occurred while processing your request: {e}")
 
+
+
+@bot.command()
+async def last_question(ctx):
+    global previous_question
+
+    if previous_question:
+        await ctx.send(f"The last question you asked me was: {previous_question}")
+    else:
+        await ctx.send("I don't recall any previous questions.")
 
 def log_conversation(author, question, response_content):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -105,10 +122,7 @@ def log_conversation(author, question, response_content):
     with open(LOG_FILE_PATH, "a") as log_file:
         log_file.write(json.dumps(log_data) + "\n")
 
-
 def run_bot():
     bot.run(os.getenv("DISCORD_TOKEN"))
 
-
-# Run the bot and start the chat session with GPT-3.5-turbo in the same event loop
 run_bot()
